@@ -1,6 +1,6 @@
+// ImageProcessor.jsx
 import React, { useState, useRef, useEffect } from 'react';
 import './ImageProcessor.css';
-
 import {
   AppBar,
   Toolbar,
@@ -12,112 +12,103 @@ import {
   Chip,
   Tooltip,
   useTheme,
-  useMediaQuery
+  useMediaQuery,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  FormControlLabel,
+  Checkbox,
+  Slider,
+  Alert
 } from '@mui/material';
 import {
   FileUpload as FileUploadIcon,
   ZoomIn as ZoomInIcon,
   Crop as CropIcon,
   PanTool as PanToolIcon,
-  Menu as MenuIcon
+  Menu as MenuIcon,
+  Close as CloseIcon,
+  Check as CheckIcon
 } from '@mui/icons-material';
 
+// Импорт модулей
+import { interpolate } from './interpolation';
+import { useImageWorker } from './useImageWorker';
+import { useImageProcessing } from './useImageProcessing';
+import { useCanvas } from './useCanvas';
+
 const ImageProcessor = () => {
-    const [imageData, setImageData] = useState(null);
-    const [status, setStatus] = useState('Ready to upload image');
-    const [viewportSize, setViewportSize] = useState({
-      width: window.innerWidth,
-      height: window.innerHeight
-    });
-    const [activeTool, setActiveTool] = useState(null);
-    const [mobileOpen, setMobileOpen] = useState(false);
-    const canvasRef = useRef(null);
-    const workerRef = useRef(null);
-    const fileInputRef = useRef(null);
-    
-    const theme = useTheme();
-    const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-    const isTablet = useMediaQuery(theme.breakpoints.between('sm', 'md'));
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   
-    const tools = [
-      { id: 'move', name: 'Move Tool', icon: <PanToolIcon /> },
-      { id: 'zoom', name: 'Zoom Tool', icon: <ZoomInIcon /> },
-      { id: 'crop', name: 'Crop Tool', icon: <CropIcon /> }
-    ];
+  // Состояния
+  const [imageData, setImageData] = useState(null);
+  const [originalImageData, setOriginalImageData] = useState(null);
+  const [status, setStatus] = useState('Ready to upload image');
+  const [activeTool, setActiveTool] = useState(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
+  const [resizeMethod, setResizeMethod] = useState('percent');
+  const [keepAspectRatio, setKeepAspectRatio] = useState(true);
+  const [interpolationMethod, setInterpolationMethod] = useState('bilinear');
+  const [scalePercent, setScalePercent] = useState(100);
+  const [scalePercentY, setScalePercentY] = useState(100); // Новое состояние для вертикального масштаба
+  const [targetWidth, setTargetWidth] = useState(0);
+  const [targetHeight, setTargetHeight] = useState(0);
+  const [scaleInput, setScaleInput] = useState(100);
+  const [validationError, setValidationError] = useState('');
+
+  const [validation, setValidation] = useState({
+    isValid: true,
+    error: '',
+    isCritical: false
+  });
+
   
-    // Инициализация Worker
-    useEffect(() => {
-      workerRef.current = new Worker(new URL('./imageWorker.js', import.meta.url), {
-        type: 'module'
-      });
-      
-      workerRef.current.onmessage = (event) => {
-        if (event.data.type === 'gb7Parsed') {
-          setImageData({
-            ...event.data.payload,
-            format: 'gb7'
-          });
-          setStatus(`Loaded GB7 image`);
-        } else if (event.data.type === 'error') {
-          setStatus(`Error: ${event.data.message}`);
-        }
-      };
-      
-      return () => {
-        workerRef.current.terminate();
-      };
-    }, []);
+  const canvasRef = useRef(null);
+  const fileInputRef = useRef(null);
+  
+  // Хуки
+  const { workerRef } = useImageWorker(setImageData, setOriginalImageData, setStatus);
+  const { 
+    parseStandardImage,
+    readFileAsArrayBuffer,
+    validateDimensions,
+    calculateInitialScale
+  } = useImageProcessing(setImageData, setOriginalImageData, setStatus, isMobile);
+  
+  const { renderCanvas } = useCanvas(
+    canvasRef, 
+    imageData, 
+    scalePercent,
+    keepAspectRatio ? scalePercent : scalePercentY,
+    interpolationMethod
+  );
 
-  // Функция для расчета масштаба изображения
-  const calculateScale = (imgWidth, imgHeight) => {
-    const maxWidth = Math.min(viewportSize.width - (isMobile ? 20 : 40), isMobile ? viewportSize.width : 1200);
-    const maxHeight = Math.min(viewportSize.height - (isMobile ? 150 : 200), isMobile ? viewportSize.height * 0.7 : 800);
-    
-    const widthScale = maxWidth / imgWidth;
-    const heightScale = maxHeight / imgHeight;
-    
-    return Math.min(widthScale, heightScale, 1);
-  };
+  const tools = [
+    { id: 'move', name: 'Move Tool', icon: <PanToolIcon /> },
+    { id: 'zoom', name: 'Zoom Tool', icon: <ZoomInIcon />, action: () => setScaleDialogOpen(true) },
+    { id: 'crop', name: 'Crop Tool', icon: <CropIcon /> }
+  ];
 
-  // Отслеживание изменения размера окна
-  useEffect(() => {
-    const handleResize = () => {
-      setViewportSize({
-        width: window.innerWidth,
-        height: window.innerHeight
-      });
-      // Закрываем панель инструментов на мобильных при изменении ориентации
-      if (window.innerWidth >= theme.breakpoints.values.sm) {
-        setMobileOpen(false);
-      }
-    };
-    
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [theme.breakpoints.values.sm]);
-
-  // Обработка стандартных изображений
-  const parseStandardImage = (file) => {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      
-      reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-          resolve({
-            width: img.width,
-            height: img.height,
-            colorDepth: 32,
-            imageElement: img,
-            format: file.type.split('/')[1] || 'unknown'
-          });
-        };
-        img.src = event.target.result;
-      };
-      
-      reader.readAsDataURL(file);
-    });
-  };
+  const interpolationMethods = [
+    { 
+      value: 'bilinear', 
+      label: 'Bilinear', 
+      description: 'Плавное масштабирование с использованием линейной интерполяции. Дает более качественный результат, но работает медленнее.' 
+    },
+    { 
+      value: 'nearestNeighbor', 
+      label: 'Nearest Neighbor', 
+      description: 'Быстрое масштабирование без сглаживания. Сохраняет четкие границы, но может создавать ступенчатые артефакты.' 
+    }
+  ];
 
   // Обработчик загрузки файла
   const handleImageUpload = async (e) => {
@@ -129,7 +120,6 @@ const ImageProcessor = () => {
       
       let imageInfo;
       if (file.name.endsWith('.gb7') || file.type === 'application/gb7') {
-        // Читаем файл перед отправкой в Worker
         const arrayBuffer = await readFileAsArrayBuffer(file);
         workerRef.current.postMessage({
           type: 'parseGB7',
@@ -143,110 +133,253 @@ const ImageProcessor = () => {
       }
       
       setImageData(imageInfo);
+      setOriginalImageData(imageInfo);
       setStatus(`Loaded ${imageInfo.format.toUpperCase()} image`);
+      setScalePercent(100);
+      setScalePercentY(100);
     } catch (error) {
       setStatus(`Error: ${error.message}`);
       console.error(error);
     }
   };
-  
-  const readFileAsArrayBuffer = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => resolve(e.target.result);
-      reader.onerror = (e) => reject(new Error('File reading failed'));
-      reader.readAsArrayBuffer(file);
-    });
-  };
 
-  // Отрисовка изображения на canvas
-  useEffect(() => {
-    if (!imageData || !canvasRef.current) return;
+  // Изменение размера изображения
+  const resizeImage = () => {
+    if (!originalImageData) return;
     
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    let newWidth, newHeight;
     
-    // Очистка canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    if (imageData.imageElement) {
-      // Стандартные форматы изображений
-      const scale = calculateScale(imageData.width, imageData.height);
-      canvas.width = imageData.width * scale;
-      canvas.height = imageData.height * scale;
-      ctx.drawImage(imageData.imageElement, 0, 0, canvas.width, canvas.height);
-    } else if (imageData.pixelData) {
-      renderGB7Image(canvas, ctx, imageData);
+    if (resizeMethod === 'percent') {
+      const scaleX = scaleInput / 100;
+      const scaleY = keepAspectRatio ? scaleX : scalePercentY / 100;
+      
+      newWidth = Math.round(originalImageData.width * scaleX);
+      newHeight = Math.round(originalImageData.height * scaleY);
+    } else {
+      newWidth = parseInt(targetWidth);
+      newHeight = keepAspectRatio 
+        ? Math.round(originalImageData.height * (targetWidth / originalImageData.width))
+        : parseInt(targetHeight);
     }
-  }, [imageData, viewportSize, isMobile]);
-
-  // Отрисовка GB7 изображения с учетом маски
-  const renderGB7Image = (canvas, ctx, imageData) => {
-    const pixelData = new Uint8Array(imageData.pixelData);
   
-    const scale = calculateScale(imageData.width, imageData.height);
-    const displayWidth = Math.floor(imageData.width * scale);
-    const displayHeight = Math.floor(imageData.height * scale);
+    const validationResult = validateDimensions(newWidth, newHeight);
+    setValidation(validationResult);
     
-    canvas.width = displayWidth;
-    canvas.height = displayHeight;
+    if (validationResult.isCritical) {
+      return;
+    }
+  
+    // Применяем изменения
+    const newScalePercent = Math.round((newWidth / originalImageData.width) * 100);
+    setScalePercent(newScalePercent);
+    setScaleInput(newScalePercent);
     
-    const tileSize = 512;
-    const tilesX = Math.ceil(imageData.width / tileSize);
-    const tilesY = Math.ceil(imageData.height / tileSize);
+    if (!keepAspectRatio) {
+      const newScalePercentY = Math.round((newHeight / originalImageData.height) * 100);
+      setScalePercentY(newScalePercentY);
+    }
+  
+
     
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = imageData.width;
-    tempCanvas.height = imageData.height;
-    const tempCtx = tempCanvas.getContext('2d');
-    
-    for (let ty = 0; ty < tilesY; ty++) {
-      for (let tx = 0; tx < tilesX; tx++) {
-        const x = tx * tileSize;
-        const y = ty * tileSize;
-        const tileWidth = Math.min(tileSize, imageData.width - x);
-        const tileHeight = Math.min(tileSize, imageData.height - y);
-        
-        const tileData = tempCtx.createImageData(tileWidth, tileHeight);
-        
-        for (let py = 0; py < tileHeight; py++) {
-          for (let px = 0; px < tileWidth; px++) {
-            const srcPos = (y + py) * imageData.width + (x + px);
-            const dstPos = (py * tileWidth + px) * 4;
-            const pixelByte = imageData.pixelData[srcPos];
-            
-            let grayValue = (pixelByte & 0x7F) << 1;
-            
-            if (imageData.hasMask) {
-              const isMasked = (pixelByte & 0x80) === 0;
-              if (isMasked) {
-                tileData.data[dstPos] = 0;
-                tileData.data[dstPos + 1] = 0;
-                tileData.data[dstPos + 2] = 0;
-                tileData.data[dstPos + 3] = 0;
-                continue;
-              }
-            }
-            
-            tileData.data[dstPos] = grayValue;
-            tileData.data[dstPos + 1] = grayValue;
-            tileData.data[dstPos + 2] = grayValue;
-            tileData.data[dstPos + 3] = 255;
+    if (originalImageData.imageElement) {
+      const canvas = document.createElement('canvas');
+      canvas.width = newWidth;
+      canvas.height = newHeight;
+      const ctx = canvas.getContext('2d');
+      
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = originalImageData.width;
+      tempCanvas.height = originalImageData.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(originalImageData.imageElement, 0, 0);
+      
+      const srcData = tempCtx.getImageData(0, 0, originalImageData.width, originalImageData.height).data;
+      const dstData = interpolate[interpolationMethod](
+        srcData,
+        originalImageData.width,
+        originalImageData.height,
+        newWidth,
+        newHeight
+      );
+      
+      const imageData = new ImageData(new Uint8ClampedArray(dstData), newWidth, newHeight);
+      ctx.putImageData(imageData, 0, 0);
+      
+      const img = new Image();
+      img.onload = () => {
+        setImageData({
+          ...originalImageData,
+          width: newWidth,
+          height: newHeight,
+          imageElement: img
+        });
+      };
+      img.src = canvas.toDataURL();
+    } else if (originalImageData.pixelData) {
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = originalImageData.width;
+      srcCanvas.height = originalImageData.height;
+      const srcCtx = srcCanvas.getContext('2d');
+      
+      const pixelData = new Uint8Array(originalImageData.pixelData);
+      const imageData = srcCtx.createImageData(originalImageData.width, originalImageData.height);
+      
+      for (let y = 0; y < originalImageData.height; y++) {
+        for (let x = 0; x < originalImageData.width; x++) {
+          const srcPos = y * originalImageData.width + x;
+          const dstPos = (y * originalImageData.width + x) * 4;
+          const pixelByte = pixelData[srcPos];
+          let grayValue = (pixelByte & 0x7F) << 1;
+          
+          if (originalImageData.hasMask && (pixelByte & 0x80) === 0) {
+            imageData.data[dstPos] = 0;
+            imageData.data[dstPos + 1] = 0;
+            imageData.data[dstPos + 2] = 0;
+            imageData.data[dstPos + 3] = 0;
+          } else {
+            imageData.data[dstPos] = grayValue;
+            imageData.data[dstPos + 1] = grayValue;
+            imageData.data[dstPos + 2] = grayValue;
+            imageData.data[dstPos + 3] = 255;
           }
         }
-        
-        tempCtx.putImageData(tileData, x, y);
       }
+      
+      srcCtx.putImageData(imageData, 0, 0);
+      
+      const dstCanvas = document.createElement('canvas');
+      dstCanvas.width = newWidth;
+      dstCanvas.height = newHeight;
+      const dstCtx = dstCanvas.getContext('2d');
+      
+      const dstData = interpolate[interpolationMethod](
+        imageData.data,
+        originalImageData.width,
+        originalImageData.height,
+        newWidth,
+        newHeight
+      );
+      
+      const newImageData = new ImageData(new Uint8ClampedArray(dstData), newWidth, newHeight);
+      dstCtx.putImageData(newImageData, 0, 0);
+      
+      const newPixelData = new Uint8Array(newWidth * newHeight);
+      const tempImageData = dstCtx.getImageData(0, 0, newWidth, newHeight).data;
+      
+      for (let i = 0; i < newWidth * newHeight; i++) {
+        const pos = i * 4;
+        const grayValue = Math.round((tempImageData[pos] + tempImageData[pos + 1] + tempImageData[pos + 2]) / 3) >> 1;
+        newPixelData[i] = grayValue & 0x7F;
+        
+        if (originalImageData.hasMask) {
+          if (tempImageData[pos + 3] === 0) {
+            newPixelData[i] &= 0x7F;
+          } else {
+            newPixelData[i] |= 0x80;
+          }
+        }
+      }
+      
+      setImageData({
+        ...originalImageData,
+        width: newWidth,
+        height: newHeight,
+        pixelData: newPixelData.buffer
+      });
     }
     
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(tempCanvas, 0, 0, displayWidth, displayHeight);
+    setScaleDialogOpen(false);
   };
+
+  // Отрисовка на canvas
+  useEffect(() => {
+    renderCanvas();
+  }, [imageData, scalePercent, interpolationMethod, renderCanvas]);
 
   const handleDrawerToggle = () => {
     setMobileOpen(!mobileOpen);
+  };
+
+  const handleScaleChange = (e, newValue) => {
+    setScaleInput(newValue);
+    setScalePercent(newValue);
+    if (keepAspectRatio) {
+      setScalePercentY(newValue);
+    }
+  };
+
+  const handleScaleChangeY = (e, newValue) => {
+    setScalePercentY(newValue);
+  };
+
+
+  const handleWidthChange = (e) => {
+    const value = parseInt(e.target.value) || 0;
+    setTargetWidth(value);
+    
+    if (keepAspectRatio && originalImageData) {
+      const newHeight = Math.round(originalImageData.height * (value / originalImageData.width));
+      setTargetHeight(newHeight);
+      // Валидируем оба размера
+      setValidation(validateDimensions(value, newHeight));
+    } else {
+      setValidation(validateDimensions(value, targetHeight));
+    }
+  };
+  
+
+  const handleHeightChange = (e) => {
+    const value = parseInt(e.target.value) || 0;
+    setTargetHeight(value);
+    
+    if (keepAspectRatio && originalImageData) {
+      const newWidth = Math.round(originalImageData.width * (value / originalImageData.height));
+      setTargetWidth(newWidth);
+      setValidation(validateDimensions(newWidth, value));
+    } else {
+      setValidation(validateDimensions(targetWidth, value));
+    }
+  };
+  
+  const handleScaleChangeX = (e, newValue) => {
+    setScaleInput(newValue);
+    
+    if (originalImageData) {
+      const newWidth = Math.round(originalImageData.width * (newValue / 100));
+      const newHeight = keepAspectRatio 
+        ? Math.round(originalImageData.height * (newValue / 100))
+        : Math.round(originalImageData.height * (scalePercentY / 100));
+      
+      setValidation(validateDimensions(newWidth, newHeight));
+    }
+  };
+  
+
+  const handleResizeMethodChange = (e) => {
+    setResizeMethod(e.target.value);
+    setValidationError('');
+    if (originalImageData) {
+      if (e.target.value === 'percent') {
+        setScaleInput(scalePercent);
+      } else {
+        setTargetWidth(originalImageData.width);
+        setTargetHeight(originalImageData.height);
+      }
+    }
+  };
+
+  const openScaleDialog = () => {
+    if (!originalImageData) return;
+    
+    if (resizeMethod === 'percent') {
+      setScaleInput(scalePercent);
+    } else {
+      setTargetWidth(originalImageData.width);
+      setTargetHeight(originalImageData.height);
+    }
+    
+    setValidationError('');
+    setScaleDialogOpen(true);
   };
 
   return (
@@ -290,7 +423,7 @@ const ImageProcessor = () => {
             accept="image/png, image/jpeg, .gb7, application/gb7"
             onChange={handleImageUpload}
           />
-           {/* Панель инструментов - для десктопа */}
+                     {/* Панель инструментов - для десктопа */}
         {!isMobile && (
           <Paper 
             sx={{ 
@@ -372,7 +505,8 @@ const ImageProcessor = () => {
       <Box sx={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>
 
         {/* Рабочая область */}
-        <Box sx={{ 
+
+       <Box sx={{ 
           flexGrow: 1, 
           display: 'flex', 
           justifyContent: 'center', 
@@ -383,16 +517,17 @@ const ImageProcessor = () => {
         }}>
           <Paper elevation={3} sx={{ 
             display: 'inline-block',
-            maxWidth: '100%',
-            maxHeight: '100%'
+            maxWidth: 'none', // Убрано ограничение максимальной ширины
+            maxHeight: 'none', // Убрано ограничение максимальной высоты
+            overflow: 'hidden' // Добавлено для корректного отображения
           }}>
             <canvas
               ref={canvasRef}
               style={{
                 display: 'block',
                 backgroundColor: '#e0e0e0',
-                maxWidth: '100%',
-                maxHeight: isMobile ? 'calc(100vh - 120px)' : 'calc(100vh - 120px)',
+                maxWidth: 'none', // Убрано ограничение
+                maxHeight: 'none', // Убрано ограничение
                 width: 'auto',
                 height: 'auto'
               }}
@@ -423,6 +558,7 @@ const ImageProcessor = () => {
             <>
               <Chip label={`${imageData.format.toUpperCase()}`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
               <Chip label={`${imageData.width}×${imageData.height}px`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
+              <Chip label={`${imageData.colorDepth || 8}bpp`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
               {imageData.format === 'gb7' && (
                 <>
                   <Chip label={`v${imageData.version}`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
@@ -441,16 +577,180 @@ const ImageProcessor = () => {
             </Typography>
           )}
         </Box>
-        <Typography variant="body2" color="text.secondary" sx={{ 
-          fontSize: isMobile ? '0.75rem' : '0.875rem',
+        
+        <Box sx={{ 
+          display: 'flex', 
+          alignItems: 'center',
+          gap: 2,
           ml: isMobile ? 'auto' : 0,
           mt: isMobile ? 1 : 0,
-          width: isMobile ? '100%' : 'auto',
-          textAlign: isMobile ? 'right' : 'left'
+          width: isMobile ? '100%' : 'auto'
         }}>
-          Viewport: {viewportSize.width}×{viewportSize.height}px
-        </Typography>
+          {imageData && (
+            <>
+              <Tooltip title="Change image scale">
+                <IconButton size="small" onClick={openScaleDialog}>
+                  <ZoomInIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              
+              <Slider
+                value={scalePercent}
+                onChange={handleScaleChange}
+                min={12}
+                max={300}
+                step={1}
+                sx={{ 
+                  width: isMobile ? 100 : 150,
+                  mx: 1
+                }}
+              />
+              <Typography variant="body2" sx={{ minWidth: 40, textAlign: 'center' }}>
+                {scalePercent}%
+              </Typography>
+            </>
+          )}
+        </Box>
       </Paper>
+
+      {/* Модальное окно изменения размера */}
+      <Dialog open={scaleDialogOpen} onClose={() => setScaleDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          Resize Image
+          <IconButton
+            aria-label="close"
+            onClick={() => setScaleDialogOpen(false)}
+            sx={{
+              position: 'absolute',
+              right: 8,
+              top: 8,
+              color: (theme) => theme.palette.grey[500],
+            }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {originalImageData && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Typography>Original size: {originalImageData.width}×{originalImageData.height}px</Typography>
+                <Typography>Current size: {imageData?.width || 0}×{imageData?.height || 0}px</Typography>
+              </Box>
+              
+              {!validation.isValid && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                {validation.error}
+              </Alert>
+            )}
+              
+              <FormControl fullWidth>
+                <InputLabel>Resize Method</InputLabel>
+                <Select
+                  value={resizeMethod}
+                  label="Resize Method"
+                  onChange={handleResizeMethodChange}
+                >
+                  <MenuItem value="percent">Percentage</MenuItem>
+                  <MenuItem value="pixels">Pixels</MenuItem>
+                </Select>
+              </FormControl>
+              
+              {resizeMethod === 'percent' ? (
+                <Box>
+                  <Typography gutterBottom>Scale X: {scaleInput}%</Typography>
+                  <Slider
+                    value={scaleInput}
+                    onChange={handleScaleChange}
+                    min={12}
+                    max={300}
+                    step={1}
+                  />
+                  
+                  {!keepAspectRatio && (
+                    <>
+                      <Typography gutterBottom sx={{ mt: 2 }}>Scale Y: {scalePercentY}%</Typography>
+                      <Slider
+                        value={scalePercentY}
+                        onChange={handleScaleChangeY}
+                        min={12}
+                        max={300}
+                        step={1}
+                        disabled={keepAspectRatio}
+                      />
+                    </>
+                )}
+              </Box>
+              ) : (
+                <Box sx={{ display: 'flex', gap: 2 }}>
+                  <TextField
+                    label="Width"
+                    type="number"
+                    value={targetWidth}
+                    onChange={handleWidthChange}
+                    fullWidth
+                    inputProps={{ min: 1, max: 10000 }}
+                    error={!!validationError}
+                  />
+                  <TextField
+                    label="Height"
+                    type="number"
+                    value={targetHeight}
+                    onChange={handleHeightChange}
+                    fullWidth
+                    inputProps={{ min: 1, max: 10000 }}
+                    disabled={keepAspectRatio}
+                    error={!!validationError}
+                  />
+                </Box>
+              )}
+              
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={keepAspectRatio}
+                    onChange={(e) => {
+                      setKeepAspectRatio(e.target.checked);
+                      if (e.target.checked) {
+                        setScalePercentY(scalePercent);
+                      }
+                    }}
+                  />
+                }
+                label="Maintain aspect ratio"
+              />
+              
+              <FormControl fullWidth>
+                <InputLabel>Interpolation Method</InputLabel>
+                <Select
+                  value={interpolationMethod}
+                  label="Interpolation Method"
+                  onChange={(e) => setInterpolationMethod(e.target.value)}
+                >
+                  {interpolationMethods.map((method) => (
+                    <MenuItem key={method.value} value={method.value}>
+                      <Tooltip title={method.description} placement="right" arrow>
+                        <Box sx={{ width: '100%' }}>{method.label}</Box>
+                      </Tooltip>
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setScaleDialogOpen(false)}>Cancel</Button>
+          <Button 
+            onClick={resizeImage}
+            variant="contained"
+            disabled={!validation.isValid || !originalImageData}
+            startIcon={<CheckIcon />}
+          >
+            Apply
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };
