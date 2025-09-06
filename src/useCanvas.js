@@ -15,6 +15,8 @@ export const useCanvas = (canvasRef, imageData, scaleX, scaleY, interpolationMet
     // Устанавливаем размеры canvas
     canvas.width = displayWidth;
     canvas.height = displayHeight;
+    canvas.style.width = `${displayWidth}px`;
+    canvas.style.height = `${displayHeight}px`;
     
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
