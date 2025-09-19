@@ -714,7 +714,7 @@ const ImageProcessor = () => {
               position: 'fixed', 
               top: 100, 
               right: 9, 
-              width: 350, 
+              width: 330, 
               p: 2,
               zIndex: 1000
             }}>
