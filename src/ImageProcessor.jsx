@@ -47,6 +47,10 @@ import {
   calculateContrastRatio
 } from './colorUtils';
 
+import { LayersPanel } from './LayersPanel';
+import AddIcon from '@mui/icons-material/Add';
+import DescriptionIcon from '@mui/icons-material/Description';
+
 import { interpolate } from './interpolation';
 import { useImageWorker } from './useImageWorker';
 import { useImageProcessing } from './useImageProcessing';
@@ -92,7 +96,11 @@ const ImageProcessor = () => {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   
-  // Состояния
+  const [layers, setLayers] = useState([]);
+  const [activeLayerId, setActiveLayerId] = useState(null);
+  const [newLayerDialogOpen, setNewLayerDialogOpen] = useState(false);
+  const [selectedColor, setSelectedColor] = useState('#ffffff');
+
   const [imageData, setImageData] = useState(null);
   const [originalImageData, setOriginalImageData] = useState(null);
   const [status, setStatus] = useState('Ready to upload image');
@@ -140,7 +148,8 @@ const ImageProcessor = () => {
     imageData, 
     scalePercent,
     keepAspectRatio ? scalePercent : scalePercentY,
-    interpolationMethod
+    interpolationMethod,
+    layers
   );
 
   const tools = [
@@ -162,6 +171,67 @@ const ImageProcessor = () => {
       description: 'Быстрое масштабирование без сглаживания. Сохраняет четкие границы, но может создавать ступенчатые артефакты.' 
     }
   ];
+
+  const createThumbnail = (image, size = 50) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    
+    const ratio = Math.min(size / image.width, size / image.height);
+    const width = image.width * ratio;
+    const height = image.height * ratio;
+    
+    ctx.drawImage(image, (size - width)/2, (size - height)/2, width, height);
+    return canvas.toDataURL();
+  };
+
+  const handleAddLayer = async () => {
+    setNewLayerDialogOpen(true);
+  };
+
+  const handleLayerFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const newLayer = {
+          id: Date.now(),
+          name: file.name,
+          image: img,
+          color: null,
+          thumbnail: createThumbnail(img),
+          opacity: 1,
+          blendMode: 'normal',
+          visible: true
+        };
+        setLayers([...layers, newLayer]);
+        setActiveLayerId(newLayer.id);
+        setNewLayerDialogOpen(false);
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCreateColorLayer = () => {
+    const newLayer = {
+      id: Date.now(),
+      name: `Color Layer`,
+      image: null,
+      color: selectedColor,
+      thumbnail: '',
+      opacity: 1,
+      blendMode: 'normal',
+      visible: true
+    };
+    setLayers([...layers, newLayer]);
+    setActiveLayerId(newLayer.id);
+    setNewLayerDialogOpen(false);
+  };
 
   // Обработчик клика по canvas для пипетки
   const handleCanvasClick = (e) => {
@@ -663,20 +733,26 @@ const ImageProcessor = () => {
         )}
         </Toolbar>
       </AppBar>
-
-      {/* Основная область */}
-      <Box sx={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>
-
+        {/* Основная область */}
+      <Box sx={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>     
         {/* Рабочая область */}
-
+      <LayersPanel
+        layers={layers}
+        activeLayerId={activeLayerId}
+        setLayers={setLayers}
+        setActiveLayerId={setActiveLayerId}
+        handleAddLayer={handleAddLayer}
+        handleLayerFileUpload={handleLayerFileUpload}
+      />
         <Box sx={{ 
-           flexGrow: 1, 
+          flexGrow: 1, 
           display: 'flex', 
           justifyContent: 'center', 
           alignItems: 'center',
           backgroundColor: '#617881ff',
           overflow: 'auto',
           p: isMobile ? 1 : 2,
+          ml: isMobile ? 0 : '0px',
           position: 'relative'
         }}>
           <Paper elevation={3} sx={{ 
@@ -771,6 +847,15 @@ const ImageProcessor = () => {
           </Paper>
         </Box>
       </Box>
+
+      {/* <LayersPanel
+        layers={layers}
+        activeLayerId={activeLayerId}
+        setLayers={setLayers}
+        setActiveLayerId={setActiveLayerId}
+        handleAddLayer={handleAddLayer}
+        handleLayerFileUpload={handleLayerFileUpload}
+      /> */}
 
       {/* Статус бар */}
       <Paper 
@@ -985,6 +1070,43 @@ const ImageProcessor = () => {
           >
             Apply
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={newLayerDialogOpen} onClose={() => setNewLayerDialogOpen(false)}>
+        <DialogTitle>Создать новый слой</DialogTitle>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Button
+            variant="contained"
+            component="label"
+            startIcon={<DescriptionIcon />}
+          >
+            Загрузить изображение
+            <input
+              type="file"
+              hidden
+              accept="image/*"
+              onChange={handleLayerFileUpload}
+            />
+          </Button>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <input
+              type="color"
+              value={selectedColor}
+              onChange={(e) => setSelectedColor(e.target.value)}
+            />
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={handleCreateColorLayer}
+            >
+              Создать цветной слой
+            </Button>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNewLayerDialogOpen(false)}>Отмена</Button>
         </DialogActions>
       </Dialog>
     </Box>
