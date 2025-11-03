@@ -1064,8 +1064,8 @@ const handleApplyFilter = async (kernelOrName) => {
       position="static"
       elevation={1}
       sx={{
-        backgroundColor: '#87CEEB',
-        color: '#333'               
+        backgroundColor: '#6c7b81ff',
+        color: '#000000ff'               
   }}
 >
         <Toolbar>

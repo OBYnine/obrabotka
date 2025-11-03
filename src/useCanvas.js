@@ -40,8 +40,6 @@ export const createGB7Image = (width, height, pixelData, hasMask) => {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
   
-  // СНАЧАЛА создаём версию БЕЗ альфа-канала (все пиксели непрозрачные)
-  // Это важно делать ПЕРВЫМ, чтобы избежать premultiplied alpha!
   const imageDataNoAlpha = ctx.createImageData(width, height);
   const dataNoAlpha = imageDataNoAlpha.data;
   
@@ -52,13 +50,12 @@ export const createGB7Image = (width, height, pixelData, hasMask) => {
     dataNoAlpha[i * 4] = gray;
     dataNoAlpha[i * 4 + 1] = gray;
     dataNoAlpha[i * 4 + 2] = gray;
-    dataNoAlpha[i * 4 + 3] = 255; // Все пиксели НЕПРОЗРАЧНЫ!
+    dataNoAlpha[i * 4 + 3] = 255;
   }
   
   ctx.putImageData(imageDataNoAlpha, 0, 0);
   const imgWithoutAlphaDataUrl = canvas.toDataURL();
   
-  // ТЕПЕРЬ создаём версию С альфа-каналом
   const imageDataWithAlpha = ctx.createImageData(width, height);
   const dataWithAlpha = imageDataWithAlpha.data;
 
@@ -83,7 +80,6 @@ export const createGB7Image = (width, height, pixelData, hasMask) => {
   imgWithAlpha.src = imgWithAlphaDataUrl;
   imgWithoutAlpha.src = imgWithoutAlphaDataUrl;
 
-  // Ждём загрузки обоих изображений
   return Promise.all([
     new Promise(resolve => { imgWithAlpha.onload = () => resolve(imgWithAlpha); }),
     new Promise(resolve => { imgWithoutAlpha.onload = () => resolve(imgWithoutAlpha); })
@@ -106,7 +102,6 @@ const applyLayer = (ctx, layer, scaleX, scaleY) => {
       const layerHeight = layer.image.height * (scaleY / 100);
       
       if (layer.showAlpha) {
-        // Рендерим только альфа-канал как черно-белое изображение
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = layer.image.width;
         tempCanvas.height = layer.image.height;
