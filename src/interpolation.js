@@ -1,4 +1,5 @@
 // interpolation.js
+
 export const interpolate = {
     nearestNeighbor: (src, srcWidth, srcHeight, dstWidth, dstHeight) => {
       const dst = new Uint8Array(dstWidth * dstHeight * 4);

@@ -1,4 +1,5 @@
 // useImageProcessing.js
+
 export const useImageProcessing = (setImageData, setOriginalImageData, setStatus, isMobile) => {
   const parseStandardImage = (file) => {
     return new Promise((resolve) => {

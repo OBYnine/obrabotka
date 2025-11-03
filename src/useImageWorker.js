@@ -1,4 +1,5 @@
 // useImageWorker.js
+
 import { useEffect, useRef } from 'react';
 
 export const useImageWorker = (setImageData, setOriginalImageData, setStatus) => {

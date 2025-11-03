@@ -1,3 +1,5 @@
+// blendModes.js
+
 export function applyBlendMode(basePixel, topPixel, blendMode, opacity) {
     if (!topPixel) return basePixel;
     if (topPixel.a === 0) return basePixel;

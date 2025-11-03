@@ -1,6 +1,8 @@
 // ImageProcessor.jsx
-import React, { useState, useRef, useEffect } from 'react';
+
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './ImageProcessor.css';
+
 import {
   AppBar,
   Toolbar,
@@ -30,14 +32,18 @@ import {
 import {
   FileUpload as FileUploadIcon,
   ZoomIn as ZoomInIcon,
-  Crop as CropIcon,
   PanTool as PanToolIcon,
   Menu as MenuIcon,
   Close as CloseIcon,
   Check as CheckIcon
 } from '@mui/icons-material';
 
+import FilterAltIcon from '@mui/icons-material/FilterAlt';
+import TuneIcon from '@mui/icons-material/Tune';
+import AddIcon from '@mui/icons-material/Add';
+import DescriptionIcon from '@mui/icons-material/Description';
 import ColorizeIcon from '@mui/icons-material/Colorize';
+
 import {
   rgbToXyz,
   xyzToLab,
@@ -47,14 +53,17 @@ import {
   calculateContrastRatio
 } from './colorUtils';
 
-import { LayersPanel } from './LayersPanel';
-import AddIcon from '@mui/icons-material/Add';
-import DescriptionIcon from '@mui/icons-material/Description';
-
-import { interpolate } from './interpolation';
+import { useFilterWorker } from './useFilterWorker';
 import { useImageWorker } from './useImageWorker';
 import { useImageProcessing } from './useImageProcessing';
-import { useCanvas } from './useCanvas';
+
+import { saveAsPNG, saveAsJPG, saveAsGB7 } from './imageExport';
+import { createGB7Image, useCanvas } from './useCanvas';
+
+import { LayersPanel } from './LayersPanel';
+import CustomFilterDialog from './CustomFilterDialog';
+import GradationCorrectionDialog from './GradationCorrectionDialog';
+
 
 const ColorSpaceInfo = ({ color }) => {
   const xyz = rgbToXyz(color);
@@ -95,10 +104,24 @@ const ColorSpaceInfo = ({ color }) => {
 const ImageProcessor = () => {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const handleExportDialogOpen = () => setExportDialogOpen(true);
+  const handleExportDialogClose = () => setExportDialogOpen(false);
+
+  const [filterDialogOpen, setFilterDialogOpen] = useState(false);
+  const [newLayerDialogOpen, setNewLayerDialogOpen] = useState(false);
+  const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
+  const [gradationDialogOpen, setGradationDialogOpen] = useState(false);
+
+  const [history, setHistory] = useState([]);
+
+  const [draggedLayer, setDraggedLayer] = useState(null);
+  const [dragStartPos, setDragStartPos] = useState({ x: 0, y: 0 });
   
   const [layers, setLayers] = useState([]);
   const [activeLayerId, setActiveLayerId] = useState(null);
-  const [newLayerDialogOpen, setNewLayerDialogOpen] = useState(false);
+
   const [selectedColor, setSelectedColor] = useState('#ffffff');
 
   const [imageData, setImageData] = useState(null);
@@ -106,7 +129,6 @@ const ImageProcessor = () => {
   const [status, setStatus] = useState('Ready to upload image');
   const [activeTool, setActiveTool] = useState(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
   const [resizeMethod, setResizeMethod] = useState('percent');
   const [keepAspectRatio, setKeepAspectRatio] = useState(true);
   const [interpolationMethod, setInterpolationMethod] = useState('bilinear');
@@ -119,10 +141,7 @@ const ImageProcessor = () => {
 
   const [firstColor, setFirstColor] = useState(null);
   const [secondColor, setSecondColor] = useState(null);
-  const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
   const [imageOffset, setImageOffset] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
   const [validation, setValidation] = useState({
     isValid: true,
@@ -130,9 +149,7 @@ const ImageProcessor = () => {
     isCritical: false
   });
 
-  
   const canvasRef = useRef(null);
-  const fileInputRef = useRef(null);
   
   // Хуки
   const { workerRef } = useImageWorker(setImageData, setOriginalImageData, setStatus);
@@ -144,19 +161,46 @@ const ImageProcessor = () => {
   } = useImageProcessing(setImageData, setOriginalImageData, setStatus, isMobile);
   
   const { renderCanvas } = useCanvas(
-    canvasRef, 
-    imageData, 
+    canvasRef,
+    layers,
     scalePercent,
     keepAspectRatio ? scalePercent : scalePercentY,
     interpolationMethod,
-    layers
+    imageOffset
   );
 
+  const { applyConvolutionFilter, applyMedianFilter, applyLaplacianFilter } = useFilterWorker();
+
   const tools = [
-    { id: 'move', name: 'Move Tool (H)', icon: <PanToolIcon />, hotkey: 'h' },
-    { id: 'eyedropper', name: 'Eyedropper Tool (I)', icon: <ColorizeIcon />, hotkey: 'i' },
-    { id: 'zoom', name: 'Zoom Tool (Z)', icon: <ZoomInIcon />, action: () => setScaleDialogOpen(true), hotkey: 'z' },
-    { id: 'crop', name: 'Crop Tool (C)', icon: <CropIcon />, hotkey: 'c' }
+    { id: 'move', name: 'Move Tool (H)', icon: <PanToolIcon />, hotkey: ['h', 'р'] },
+    { id: 'eyedropper', name: 'Eyedropper Tool (I)', icon: <ColorizeIcon />, hotkey: ['i', 'ш'] },
+    { id: 'zoom', name: 'Zoom Tool (Z)', icon: <ZoomInIcon />, action: () => setScaleDialogOpen(true), hotkey: ['z', 'я'] },
+    { 
+      id: 'gradation', 
+      name: 'Gradation Correction (G)', 
+      icon: <TuneIcon />, 
+      action: () => {
+        if (!activeLayerId) {
+          setStatus('Please select a layer first');
+          return;
+        }
+        setGradationDialogOpen(true);
+      },
+      hotkey: ['g', 'п'] 
+    },
+    { 
+      id: 'filter', 
+      name: 'Filter (F)', 
+      icon: <FilterAltIcon />, 
+      action: () => {
+        if (!activeLayerId) {
+          setStatus('Please select a layer first');
+          return;
+        }
+        setFilterDialogOpen(true);
+      },
+      hotkey: ['f', 'а'] 
+    }
   ];
 
   const interpolationMethods = [
@@ -171,6 +215,137 @@ const ImageProcessor = () => {
       description: 'Быстрое масштабирование без сглаживания. Сохраняет четкие границы, но может создавать ступенчатые артефакты.' 
     }
   ];
+
+  const createAlphaImage = (image) => {
+    return new Promise((resolve) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const alpha = data[i + 3];
+        data[i] = data[i + 1] = data[i + 2] = alpha;
+        data[i + 3] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      const alphaImg = new Image();
+      alphaImg.onload = () => resolve(alphaImg);
+      alphaImg.src = canvas.toDataURL();
+    });
+  };
+
+
+  const handleApplyMedian = async () => {
+    const activeLayer = layers.find(layer => layer.id === activeLayerId);
+    if (!activeLayer?.image) return;
+
+    const result = await applyMedianFilter(activeLayer.image);
+    setLayers(prev =>
+      prev.map(layer =>
+        layer.id === activeLayerId ? { ...layer, image: result } : layer
+      )
+    );
+  };
+
+const handleApplyLaplacian = async () => {
+  const activeLayer = layers.find(layer => layer.id === activeLayerId);
+  if (!activeLayer?.image) return;
+
+  const result = await applyLaplacianFilter(activeLayer.image);
+  setLayers(prev =>
+    prev.map(layer =>
+      layer.id === activeLayerId ? { ...layer, image: result } : layer
+    )
+  );
+};
+
+
+  const applyLUTToLayer = (layer, lut) => {
+    if (!layer.image) return layer;
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = layer.image.width;
+    canvas.height = layer.image.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(layer.image, 0, 0);
+    
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = lut[data[i]];     // R
+      data[i + 1] = lut[data[i + 1]]; // G
+      data[i + 2] = lut[data[i + 2]]; // B
+      // Alpha channel (data[i+3]) не изменяем
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    
+    const correctedImage = new Image();
+    correctedImage.onload = () => {
+      // Обновляем состояние после загрузки изображения
+      setLayers(prev => prev.map(l => 
+        l.id === layer.id ? {...l, image: correctedImage} : l
+      ));
+    };
+    correctedImage.src = canvas.toDataURL();
+    
+    return {
+      ...layer,
+      image: correctedImage
+    };
+  };
+
+  const handleGradationCorrection = (layerId, lut, channel = 'rgb') => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+
+    setHistory([...history, {
+      layers: [...layers],
+      timestamp: Date.now()
+    }]);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = layer.image.width;
+    canvas.height = layer.image.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(layer.image, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+      if (channel === 'red') {
+        data[i] = lut[data[i]];
+      } else if (channel === 'green') {
+        data[i + 1] = lut[data[i + 1]];
+      } else if (channel === 'blue') {
+        data[i + 2] = lut[data[i + 2]];
+      } else if (channel === 'alpha') {
+        data[i + 3] = lut[data[i + 3]];
+      } else {
+        data[i] = lut[data[i]];
+        data[i + 1] = lut[data[i + 1]];
+        data[i + 2] = lut[data[i + 2]];
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    const correctedImage = new Image();
+    correctedImage.onload = () => {
+      setLayers(prev => prev.map(l =>
+        l.id === layerId ? { ...l, image: correctedImage } : l
+      ));
+    };
+    correctedImage.src = canvas.toDataURL();
+  };
+
+
 
   const createThumbnail = (image, size = 50) => {
     const canvas = document.createElement('canvas');
@@ -187,6 +362,10 @@ const ImageProcessor = () => {
   };
 
   const handleAddLayer = async () => {
+    if (layers.length >= 2) {
+      setStatus('Maximum 2 layers allowed');
+      return;
+    }
     setNewLayerDialogOpen(true);
   };
 
@@ -194,40 +373,152 @@ const ImageProcessor = () => {
     const file = e.target.files[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
+    try {
+      setStatus('');
+            setNewLayerDialogOpen(false);
+      if (file.name.endsWith('.gb7')) {
+        const arrayBuffer = await readFileAsArrayBuffer(file);
+        // Всегда добавляем новый GB7-слой
+        workerRef.current.postMessage(
+          { type: 'parseGB7', buffer: arrayBuffer, fileName: file.name },
+          [arrayBuffer]
+        );
+
+        return;
+      }
+      else if (file.type.match('image.*')) {
+        const imageInfo = await parseStandardImage(file);
+        const alphaImage = await createAlphaImage(imageInfo.imageElement);
+        
         const newLayer = {
           id: Date.now(),
           name: file.name,
-          image: img,
-          color: null,
-          thumbnail: createThumbnail(img),
+          image: imageInfo.imageElement,
+          originalImage: imageInfo.imageElement,
+          alphaImage,
+          thumbnail: createThumbnail(imageInfo.imageElement),
           opacity: 1,
           blendMode: 'normal',
-          visible: true
+          visible: true,
+          x: 0,
+          y: 0,
+          showAlpha: false,            
+          hasAlpha: true,              
         };
-        setLayers([...layers, newLayer]);
+
+        setLayers(prev => [...prev, newLayer].slice(0, MAX_LAYERS));
         setActiveLayerId(newLayer.id);
-        setNewLayerDialogOpen(false);
-      };
-      img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+      } else {
+        throw new Error('Unsupported file format');
+      }
+    } catch (error) {
+      setStatus(`Error: ${error.message}`);
+    }
   };
 
+  function createAlphaThumbnail(image, size = 50) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const ratio = Math.min(size / image.width, size / image.height);
+    const w = image.width * ratio;
+    const h = image.height * ratio;
+    ctx.drawImage(image, (size - w)/2, (size - h)/2, w, h);
+    const imgData = ctx.getImageData(0, 0, size, size);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i+3];
+      d[i] = d[i+1] = d[i+2] = a;
+      d[i+3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return canvas.toDataURL();
+  }
+
+  // Обработчик сообщений от worker
+  useEffect(() => {
+    workerRef.current.onmessage = async (event) => {
+      if (event.data.type === 'gb7Parsed') {
+        const { width, height, pixelData, hasMask, fileName } = event.data.payload;
+        const images = await createGB7Image(width, height, pixelData, hasMask);
+        
+        // Создаём миниатюру альфа-канала
+        const alphaThumbnail = createAlphaThumbnail(images.imageWithAlpha);
+
+        // Создаём и добавляем новый слой
+        const newLayer = {
+          id: Date.now(),
+          name: fileName,
+          image: images.imageWithAlpha,           // Изображение С альфой
+          imageWithoutAlpha: images.imageWithoutAlpha, // Изображение БЕЗ альфы
+          originalImage: images.imageWithAlpha,
+          thumbnail: createThumbnail(images.imageWithAlpha),
+          alphaThumbnail,
+          opacity: 1,
+          blendMode: 'normal',
+          visible: true,
+          x: 0,
+          y: 0,
+          showAlpha: false,
+          hasAlpha: true,
+        };
+        setLayers(prev => [...prev, newLayer]);
+        setActiveLayerId(newLayer.id);
+        setStatus('');
+        setNewLayerDialogOpen(false);
+      }
+      else if (event.data.type === 'error') {
+        setStatus(`Error: ${event.data.message}`);
+      }
+    };
+  }, [layers]);
+
+
   const handleCreateColorLayer = () => {
+    // Определяем размеры нового слоя
+    let width, height;
+    
+    if (layers.length === 0) {
+      // Если это первый слой, создаем с базовым размером
+      width = 800;
+      height = 600;
+    } else {
+      // Если уже есть слои, берем размер первого слоя
+      width = layers[0].image?.width || 800;
+      height = layers[0].image?.height || 600;
+    }
+
+    // Создаем canvas с нужным цветом
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    
+    // Заполняем canvas выбранным цветом
+    ctx.fillStyle = selectedColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // Создаем изображение из canvas
+    const image = new Image();
+    image.src = canvas.toDataURL();
+
     const newLayer = {
       id: Date.now(),
-      name: `Color Layer`,
-      image: null,
-      color: selectedColor,
-      thumbnail: '',
+      name: `Color Layer (${selectedColor})`,
+      image: image,
+      thumbnail: createThumbnail(image),
       opacity: 1,
       blendMode: 'normal',
-      visible: true
+      visible: true,
+      x: 0,
+      y: 0,
+      isColorLayer: true,
+      color: selectedColor,
+      showAlpha: false,
+      hasAlpha: true,
     };
+
     setLayers([...layers, newLayer]);
     setActiveLayerId(newLayer.id);
     setNewLayerDialogOpen(false);
@@ -235,21 +526,44 @@ const ImageProcessor = () => {
 
   // Обработчик клика по canvas для пипетки
   const handleCanvasClick = (e) => {
-    if (!imageData || activeTool !== 'eyedropper') return;
+    if (!imageData && layers.length === 0) return;
 
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const x = e.clientX - rect.left - imageOffset.x;
+    const y = e.clientY - rect.top - imageOffset.y;
 
-    // Учитываем смещение и масштаб
-    const imgX = Math.floor((x - imageOffset.x) / (scalePercent / 100));
-    const imgY = Math.floor((y - imageOffset.y) / (scalePercent / 100));
+    // Учитываем масштаб
+    const imgX = Math.floor(x / (scalePercent / 100));
+    const imgY = Math.floor(y / (scalePercent / 100));
 
-    if (imgX < 0 || imgY < 0 || imgX >= imageData.width || imgY >= imageData.height) return;
-
+    let pixel = null;
     const ctx = canvas.getContext('2d');
-    const pixel = ctx.getImageData(x, y, 1, 1).data;
+    
+    // Проверяем основной imageData
+    if (imageData) {
+      if (imgX >= 0 && imgY >= 0 && imgX < imageData.width && imgY < imageData.height) {
+        pixel = ctx.getImageData(x, y, 1, 1).data;
+      }
+    }
+
+    // Если не найден в основном изображении, проверяем слои
+    if (!pixel) {
+      layers.some(layer => {
+        if (layer.image && layer.visible) {
+          const layerX = imgX - (layer.x || 0);
+          const layerY = imgY - (layer.y || 0);
+          if (layerX >= 0 && layerY >= 0 && layerX < layer.image.width && layerY < layer.image.height) {
+            pixel = ctx.getImageData(x, y, 1, 1).data;
+            return true;
+          }
+        }
+        return false;
+      });
+    }
+
+    if (!pixel) return;
+
     const color = {
       r: pixel[0],
       g: pixel[1],
@@ -266,240 +580,204 @@ const ImageProcessor = () => {
     }
   };
 
-  // Обработчики для инструмента "рука"
+  // Для инструмента "Рука"
   const handleMouseDown = (e) => {
-    if (activeTool === 'move' && e.button === 0) {
-      setIsDragging(true);
-      setDragStart({
-        x: e.clientX - imageOffset.x,
-        y: e.clientY - imageOffset.y
+    if (activeTool !== 'move') return;
+    
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left - imageOffset.x;
+    const mouseY = e.clientY - rect.top - imageOffset.y;
+
+    // Проверяем все слои
+    const clickedLayer = layers.find(layer => {
+      if (!layer.visible || !layer.image) return false;
+      
+      const layerWidth = layer.image.width * (scalePercent / 100);
+      const layerHeight = layer.image.height * (scalePercent / 100);
+      
+      return (
+        mouseX >= layer.x && 
+        mouseX <= layer.x + layerWidth &&
+        mouseY >= layer.y && 
+        mouseY <= layer.y + layerHeight
+      );
+    });
+
+    if (clickedLayer) {
+      setDraggedLayer(clickedLayer.id);
+      setDragStartPos({ 
+        x: mouseX - clickedLayer.x, 
+        y: mouseY - clickedLayer.y 
       });
-      e.preventDefault(); // Предотвращаем выделение текста при перетаскивании
-    }
-  };
-  
-  const handleMouseMove = (e) => {
-    setCursorPosition({ x: e.clientX, y: e.clientY });
-  
-    if (isDragging && activeTool === 'move') {
-      const newOffset = {
-        x: e.clientX - dragStart.x,
-        y: e.clientY - dragStart.y
-      };
-      
-      // Ограничиваем перемещение, чтобы часть изображения всегда оставалась видимой
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const container = canvas.parentElement.parentElement;
-        const maxX = Math.max(0, canvas.width - container.clientWidth);
-        const maxY = Math.max(0, canvas.height - container.clientHeight);
-        
-        newOffset.x = Math.min(0, Math.max(-maxX, newOffset.x));
-        newOffset.y = Math.min(0, Math.max(-maxY, newOffset.y));
-      }
-      
-      setImageOffset(newOffset);
       e.preventDefault();
     }
   };
 
+  const handleMouseMove = (e) => {
+    if (!draggedLayer || activeTool !== 'move') return;
+    
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    setLayers(layers.map(layer => {
+      if (layer.id === draggedLayer) {
+        return {
+          ...layer,
+          x: mouseX - dragStartPos.x,
+          y: mouseY - dragStartPos.y
+        };
+      }
+      return layer;
+    }));
+
+    e.preventDefault();
+  };
+
   const handleMouseUp = () => {
-    setIsDragging(false);
+    setDraggedLayer(null);
   };
 
   // Обработчик клавиатуры для горячих клавиш
   useEffect(() => {
     const handleKeyDown = (e) => {
-      const tool = tools.find(t => t.hotkey === e.key.toLowerCase());
+      // игнорируем, если фокус в input/textarea/select
+      const tag = document.activeElement.tagName.toLowerCase();
+      if (['input', 'textarea', 'select'].includes(tag)) return;
+
+      // Горячие клавиши инструментов
+      const tool = tools.find(t => t.hotkey.includes(e.key.toLowerCase()));
       if (tool) {
         setActiveTool(tool.id);
         if (tool.action) tool.action();
+        return;
       }
+
+      // Перемещение активного слоя стрелками
+      if (
+        ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) &&
+        activeLayerId !== null
+      ) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+
+        setLayers(prevLayers => {
+          const updated = prevLayers.map(layer => {
+            if (layer.id !== activeLayerId) return layer;
+
+            let newX = layer.x ?? 0;
+            let newY = layer.y ?? 0;
+
+            if (e.key === 'ArrowUp') newY -= step;
+            if (e.key === 'ArrowDown') newY += step;
+            if (e.key === 'ArrowLeft') newX -= step;
+            if (e.key === 'ArrowRight') newX += step;
+
+            return { ...layer, x: newX, y: newY };
+          });
+
+          return updated;
+        });
+      }
+
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [activeLayerId]);
 
-  // Обработчик загрузки файла
+
+  const MAX_LAYERS = 2; // Константа для максимального числа слоев
   const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-  
+
     try {
-      setStatus('Loading image...');
-      
+      setStatus('');
       let imageInfo;
-      if (file.name.endsWith('.gb7') || file.type === 'application/gb7') {
+
+      if (file.name.endsWith('.gb7')) {
         const arrayBuffer = await readFileAsArrayBuffer(file);
-        workerRef.current.postMessage({
-          type: 'parseGB7',
-          buffer: arrayBuffer
-        }, [arrayBuffer]);
+        workerRef.current.postMessage(
+          { type: 'parseGB7', buffer: arrayBuffer, fileName: file.name },
+          [arrayBuffer]
+        );
         return;
       } else if (file.type.match('image.*')) {
         imageInfo = await parseStandardImage(file);
       } else {
         throw new Error('Unsupported file format');
       }
-      
-      setImageData(imageInfo);
-      setOriginalImageData(imageInfo);
-      setStatus(`Loaded ${imageInfo.format.toUpperCase()} image`);
-      setScalePercent(100);
-      setScalePercentY(100);
+
+      const newLayer = {
+        id: Date.now(),
+        name: file.name,
+        image: imageInfo.imageElement,
+        thumbnail: createThumbnail(imageInfo.imageElement),
+        opacity: 1,
+        blendMode: 'normal',
+        visible: true,
+        x: 0,
+        y: 0,
+        showAlpha: false,
+        hasAlpha: true,
+      };
+
+      setLayers((prev) => [...prev, newLayer]);
+      setActiveLayerId(newLayer.id);
+
     } catch (error) {
       setStatus(`Error: ${error.message}`);
-      console.error(error);
     }
   };
 
-  // Изменение размера изображения
   const resizeImage = () => {
-    if (!originalImageData) return;
-    
+    const activeLayer = layers.find(layer => layer.id === activeLayerId);
+    const targetImage = activeLayer?.image || originalImageData?.imageElement;
+    if (!targetImage) return;
+
     let newWidth, newHeight;
-    
+
     if (resizeMethod === 'percent') {
       const scaleX = scaleInput / 100;
       const scaleY = keepAspectRatio ? scaleX : scalePercentY / 100;
-      
-      newWidth = Math.round(originalImageData.width * scaleX);
-      newHeight = Math.round(originalImageData.height * scaleY);
+      newWidth = Math.round(targetImage.width * scaleX);
+      newHeight = Math.round(targetImage.height * scaleY);
     } else {
       newWidth = parseInt(targetWidth);
       newHeight = keepAspectRatio 
-        ? Math.round(originalImageData.height * (targetWidth / originalImageData.width))
+        ? Math.round(targetImage.height * (targetWidth / targetImage.width))
         : parseInt(targetHeight);
     }
-  
-    const validationResult = validateDimensions(newWidth, newHeight);
-    setValidation(validationResult);
-    
-    if (validationResult.isCritical) {
-      return;
-    }
-  
-    // Применяем изменения
-    const newScalePercent = Math.round((newWidth / originalImageData.width) * 100);
-    setScalePercent(newScalePercent);
-    setScaleInput(newScalePercent);
-    
-    if (!keepAspectRatio) {
-      const newScalePercentY = Math.round((newHeight / originalImageData.height) * 100);
-      setScalePercentY(newScalePercentY);
-    }
-  
 
-    
-    if (originalImageData.imageElement) {
-      const canvas = document.createElement('canvas');
-      canvas.width = newWidth;
-      canvas.height = newHeight;
-      const ctx = canvas.getContext('2d');
-      
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = originalImageData.width;
-      tempCanvas.height = originalImageData.height;
-      const tempCtx = tempCanvas.getContext('2d');
-      tempCtx.drawImage(originalImageData.imageElement, 0, 0);
-      
-      const srcData = tempCtx.getImageData(0, 0, originalImageData.width, originalImageData.height).data;
-      const dstData = interpolate[interpolationMethod](
-        srcData,
-        originalImageData.width,
-        originalImageData.height,
-        newWidth,
-        newHeight
+    // Создаем новое изображение через canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = newWidth;
+    canvas.height = newHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = interpolationMethod === 'bilinear';
+    ctx.drawImage(targetImage, 0, 0, newWidth, newHeight);
+
+    const resizedImage = new Image();
+    resizedImage.src = canvas.toDataURL();
+    resizedImage.onload = () => {
+      // Обновляем активный слой с новым изображением
+      setLayers(prev =>
+        prev.map(layer =>
+          layer.id === activeLayerId
+            ? {
+                ...layer,
+                image: resizedImage,
+                width: newWidth,
+                height: newHeight
+              }
+            : layer
+        )
       );
-      
-      const imageData = new ImageData(new Uint8ClampedArray(dstData), newWidth, newHeight);
-      ctx.putImageData(imageData, 0, 0);
-      
-      const img = new Image();
-      img.onload = () => {
-        setImageData({
-          ...originalImageData,
-          width: newWidth,
-          height: newHeight,
-          imageElement: img
-        });
-      };
-      img.src = canvas.toDataURL();
-    } else if (originalImageData.pixelData) {
-      const srcCanvas = document.createElement('canvas');
-      srcCanvas.width = originalImageData.width;
-      srcCanvas.height = originalImageData.height;
-      const srcCtx = srcCanvas.getContext('2d');
-      
-      const pixelData = new Uint8Array(originalImageData.pixelData);
-      const imageData = srcCtx.createImageData(originalImageData.width, originalImageData.height);
-      
-      for (let y = 0; y < originalImageData.height; y++) {
-        for (let x = 0; x < originalImageData.width; x++) {
-          const srcPos = y * originalImageData.width + x;
-          const dstPos = (y * originalImageData.width + x) * 4;
-          const pixelByte = pixelData[srcPos];
-          let grayValue = (pixelByte & 0x7F) << 1;
-          
-          if (originalImageData.hasMask && (pixelByte & 0x80) === 0) {
-            imageData.data[dstPos] = 0;
-            imageData.data[dstPos + 1] = 0;
-            imageData.data[dstPos + 2] = 0;
-            imageData.data[dstPos + 3] = 0;
-          } else {
-            imageData.data[dstPos] = grayValue;
-            imageData.data[dstPos + 1] = grayValue;
-            imageData.data[dstPos + 2] = grayValue;
-            imageData.data[dstPos + 3] = 255;
-          }
-        }
-      }
-      
-      srcCtx.putImageData(imageData, 0, 0);
-      
-      const dstCanvas = document.createElement('canvas');
-      dstCanvas.width = newWidth;
-      dstCanvas.height = newHeight;
-      const dstCtx = dstCanvas.getContext('2d');
-      
-      const dstData = interpolate[interpolationMethod](
-        imageData.data,
-        originalImageData.width,
-        originalImageData.height,
-        newWidth,
-        newHeight
-      );
-      
-      const newImageData = new ImageData(new Uint8ClampedArray(dstData), newWidth, newHeight);
-      dstCtx.putImageData(newImageData, 0, 0);
-      
-      const newPixelData = new Uint8Array(newWidth * newHeight);
-      const tempImageData = dstCtx.getImageData(0, 0, newWidth, newHeight).data;
-      
-      for (let i = 0; i < newWidth * newHeight; i++) {
-        const pos = i * 4;
-        const grayValue = Math.round((tempImageData[pos] + tempImageData[pos + 1] + tempImageData[pos + 2]) / 3) >> 1;
-        newPixelData[i] = grayValue & 0x7F;
-        
-        if (originalImageData.hasMask) {
-          if (tempImageData[pos + 3] === 0) {
-            newPixelData[i] &= 0x7F;
-          } else {
-            newPixelData[i] |= 0x80;
-          }
-        }
-      }
-      
-      setImageData({
-        ...originalImageData,
-        width: newWidth,
-        height: newHeight,
-        pixelData: newPixelData.buffer
-      });
-    }
-    
-    setScaleDialogOpen(false);
+      setScaleDialogOpen(false);
+    };
   };
 
   // Отрисовка на canvas
@@ -512,6 +790,17 @@ const ImageProcessor = () => {
   };
 
   const handleScaleChange = (e, newValue) => {
+    const newScale = Math.min(Math.max(newValue, 12), 300);
+  
+    setScaleInput(newScale);
+    setScalePercent(newScale);
+    
+    // Обновляем масштаб для всех слоёв
+    setLayers(layers.map(layer => ({
+      ...layer,
+      scale: newScale / 100
+    })));
+    
     setScaleInput(newValue);
     setScalePercent(newValue);
     if (keepAspectRatio) {
@@ -546,28 +835,28 @@ const ImageProcessor = () => {
   const handleWidthChange = (e) => {
     const value = parseInt(e.target.value) || 0;
     setTargetWidth(value);
-    
     if (keepAspectRatio && originalImageData) {
       const newHeight = Math.round(originalImageData.height * (value / originalImageData.width));
       setTargetHeight(newHeight);
-      // Валидируем оба размера
-      setValidation(validateDimensions(value, newHeight));
+      const result = validateDimensions(value, newHeight);
+      setValidation(result);
     } else {
-      setValidation(validateDimensions(value, targetHeight));
+      const result = validateDimensions(value, targetHeight);
+      setValidation(result);
     }
   };
-  
 
   const handleHeightChange = (e) => {
     const value = parseInt(e.target.value) || 0;
     setTargetHeight(value);
-    
     if (keepAspectRatio && originalImageData) {
       const newWidth = Math.round(originalImageData.width * (value / originalImageData.height));
       setTargetWidth(newWidth);
-      setValidation(validateDimensions(newWidth, value));
+      const result = validateDimensions(newWidth, value);
+      setValidation(result);
     } else {
-      setValidation(validateDimensions(targetWidth, value));
+      const result = validateDimensions(targetWidth, value);
+      setValidation(result);
     }
   };
   
@@ -586,38 +875,192 @@ const ImageProcessor = () => {
   
 
   const handleResizeMethodChange = (e) => {
-    setResizeMethod(e.target.value);
-    setValidationError('');
-    if (originalImageData) {
-      if (e.target.value === 'percent') {
-        setScaleInput(scalePercent);
-      } else {
-        setTargetWidth(originalImageData.width);
-        setTargetHeight(originalImageData.height);
-      }
+    const method = e.target.value;
+    setResizeMethod(method);
+
+    const activeLayer = layers.find(l => l.id === activeLayerId);
+    const targetImage = activeLayer?.image || originalImageData?.imageElement;
+
+    if (!targetImage) return;
+
+    const width = targetImage.width;
+    const height = targetImage.height;
+
+    if (method === 'percent') {
+      setScaleInput(scalePercent); // восстанавливаем текущий scale
+      const result = validateDimensions(width * (scaleInput / 100), height * (scaleInput / 100));
+      setValidation(result);
+    } else {
+      setTargetWidth(width);
+      setTargetHeight(height);
+      const result = validateDimensions(width, height);
+      setValidation(result);
     }
   };
 
   const openScaleDialog = () => {
-    if (!originalImageData) return;
-    
+    const activeLayer = layers.find(layer => layer.id === activeLayerId);
+    const targetImage = activeLayer?.image || originalImageData?.imageElement;
+    if (!targetImage) {
+      setStatus('Please load an image or select a layer');
+      return;
+    }
+
+    // Установка начальных значений на основе изображения
+    const initialWidth = targetImage.width;
+    const initialHeight = targetImage.height;
+
     if (resizeMethod === 'percent') {
       setScaleInput(scalePercent);
     } else {
-      setTargetWidth(originalImageData.width);
-      setTargetHeight(originalImageData.height);
+      setTargetWidth(initialWidth);
+      setTargetHeight(initialHeight);
+      // Валидируем сразу
+      const result = validateDimensions(initialWidth, initialHeight);
+      setValidation(result);
     }
-    
+
     setValidationError('');
     setScaleDialogOpen(true);
   };
 
+  const CustomDialog = ({ open, onClose, children }) => {
+    if (!open) return null;
+    
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 1300
+      }}>
+        <Paper sx={{ 
+          padding: 3,
+          minWidth: 300,
+          outline: 'none' // Убираем outline чтобы не было двойного фокуса
+        }}>
+          {children}
+        </Paper>
+      </div>
+    );
+  };
+
+const handleApplyFilter = async (kernelOrName) => {
+  const activeLayer = layers.find(layer => layer.id === activeLayerId);
+  if (!activeLayer?.image) return;
+
+  let resultImage = null;
+
+  if (kernelOrName === 'median') {
+    resultImage = await applyMedianFilter(activeLayer.image);
+  } else if (kernelOrName === 'laplacian') {
+    resultImage = await applyLaplacianFilter(activeLayer.image);
+  } else {
+    resultImage = await applyConvolutionFilter(activeLayer.image, kernelOrName);
+  }
+
+  setLayers(prev =>
+    prev.map(layer =>
+      layer.id === activeLayerId ? { ...layer, image: resultImage } : layer
+    )
+  );
+};
+
+
+  const renderAllLayersToCanvas = () => {
+    if (!layers.length) return null;
+
+    // Вычисляем максимальные габариты для всех слоёв
+    let minX = 0, minY = 0, maxX = 0, maxY = 0;
+    layers.forEach(layer => {
+      if (!layer.image || !layer.visible) return;
+      const x = layer.x || 0;
+      const y = layer.y || 0;
+      const w = layer.image.width;
+      const h = layer.image.height;
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + w);
+      maxY = Math.max(maxY, y + h);
+    });
+
+    const canvasWidth = maxX - minX;
+    const canvasHeight = maxY - minY;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    // Отрисовка всех слоёв с учетом смещения (minX/minY)
+    [...layers].reverse().forEach(layer => {
+      if (!layer.visible || !layer.image) return;
+
+      const x = (layer.x || 0) - minX;
+      const y = (layer.y || 0) - minY;
+
+      ctx.save();
+      ctx.globalAlpha = layer.opacity ?? 1.0;
+      ctx.globalCompositeOperation = layer.blendMode ?? 'normal';
+      ctx.drawImage(layer.image, x, y);
+      ctx.restore();
+    });
+
+    return canvas;
+  };
+
+  const handleExportPNG = () => {
+    const canvas = renderAllLayersToCanvas();
+    if (canvas) saveAsPNG(canvas);
+  };
+
+  const handleExportJPG = () => {
+    const canvas = renderAllLayersToCanvas();
+    if (canvas) saveAsJPG(canvas);
+  };
+
+
+  const handleExportGB7 = () => {
+    const canvas = renderAllLayersToCanvas();
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+
+    const pixelData = new Uint8Array(canvas.width * canvas.height);
+
+    for (let i = 0; i < pixelData.length; i++) {
+      const offset = i * 4;
+      const r = imageData[offset];
+      const g = imageData[offset + 1];
+      const b = imageData[offset + 2];
+      const a = imageData[offset + 3];
+
+      const gray = Math.round((r + g + b) / 3);
+      const maskBit = a < 128 ? 0x00 : 0x80; // если альфа < 50%, считаем пиксель прозрачным
+      const byte = maskBit | (gray >> 1); // 7 бит: 1 бит маски + 6 бит яркости
+
+      pixelData[i] = byte;
+    }
+
+    saveAsGB7(pixelData, canvas.width, canvas.height, true);
+  };
 
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '97vh' }}>
       {/* Верхняя панель */}
-     <AppBar
+      <AppBar
       position="static"
       elevation={1}
       sx={{
@@ -637,25 +1080,24 @@ const ImageProcessor = () => {
             </IconButton>
           )}
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            GrayBit-7 Image Processor
+            Photoshop
           </Typography>
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={!isMobile && <FileUploadIcon />}
-            onClick={() => fileInputRef.current.click()}
-            size={isMobile ? "small" : "medium"}
-          >
-            {isMobile ? <FileUploadIcon /> : 'Open Image'}
-          </Button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            style={{ display: 'none' }}
-            accept="image/png, image/jpeg, .gb7, application/gb7"
-            onChange={handleImageUpload}
-          />
-                       {/* Панель инструментов - для десктопа */}
+
+         <Button
+          variant="contained"
+          onClick={handleExportDialogOpen}
+          sx={{
+            backgroundColor: '#fff',
+            color: '#333',
+            '&:hover': {
+              backgroundColor: '#f0f0f0'
+            }
+          }}
+        >
+          Сохранить фото
+        </Button>
+
+        {/* Панель инструментов - для десктопа */}
         {!isMobile && (
           <Paper 
             sx={{ 
@@ -671,12 +1113,18 @@ const ImageProcessor = () => {
             }}
             elevation={2}
           >
+
             {tools.map((tool) => (
-              <Tooltip key={tool.id} title={tool.name} placement="right">
+              <Tooltip title={tool.name} key={tool.id} placement="right">
                 <IconButton
                   color={activeTool === tool.id ? 'primary' : 'default'}
-                  onClick={tool.action || (() => setActiveTool(tool.id))}
-                  size={isMobile ? "small" : "medium"}
+                  onClick={() => {
+                    if (tool.id === 'gradation' && !activeLayerId) {
+                      setStatus('Select a layer to apply gradation correction');
+                      return;
+                    }
+                    tool.action?.() || setActiveTool(tool.id);
+                  }}
                 >
                   {tool.icon}
                 </IconButton>
@@ -686,9 +1134,9 @@ const ImageProcessor = () => {
         )}
 
         {/* Панель инструментов - для мобильных */}
-       {isMobile && (
+        {isMobile && (
           <Box
-            sx={{
+             sx={{
               left: 0,
               position: 'fixed',
               top: mobileOpen ? 70 : -80,
@@ -731,11 +1179,32 @@ const ImageProcessor = () => {
             </Paper>
           </Box>
         )}
-        </Toolbar>
+                </Toolbar>
       </AppBar>
-        {/* Основная область */}
-      <Box sx={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>     
+
+
+{/* Основная область */}
+      <Box sx={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>
+
         {/* Рабочая область */}
+      <GradationCorrectionDialog
+        open={gradationDialogOpen}
+        onClose={() => setGradationDialogOpen(false)}
+        layers={layers}
+        activeLayerId={activeLayerId}
+        onApplyCorrection={handleGradationCorrection}
+        setLayers={setLayers}
+        
+      />
+      <CustomFilterDialog
+        open={filterDialogOpen}
+        onClose={() => setFilterDialogOpen(false)}
+        onApply={handleApplyFilter}
+        activeLayer={layers.find(l => l.id === activeLayerId)}
+        setLayers={setLayers}
+        activeLayerId={activeLayerId}
+        layers={layers}
+      />
       <LayersPanel
         layers={layers}
         activeLayerId={activeLayerId}
@@ -749,7 +1218,7 @@ const ImageProcessor = () => {
           display: 'flex', 
           justifyContent: 'center', 
           alignItems: 'center',
-          backgroundColor: '#617881ff',
+          backgroundColor: '#ffffffff',
           overflow: 'auto',
           p: isMobile ? 1 : 2,
           ml: isMobile ? 0 : '0px',
@@ -766,31 +1235,31 @@ const ImageProcessor = () => {
               position: 'relative',
               display: 'inline-block'
             }}>
-            <canvas
-              ref={canvasRef}
-              style={{
-                display: 'block',
-                backgroundColor: '#e0e0e0',
-                cursor: activeTool === 'move' ? 'grab' : 
-                      activeTool === 'eyedropper' ? 'crosshair' : 
-                      'default',
-                transform: `translate(${imageOffset.x}px, ${imageOffset.y}px)`,
-                minWidth: imageData ? imageData.width * (scalePercent / 100) : 'auto',
-                minHeight: imageData ? imageData.height * (scalePercent / 100) : 'auto'
-              }}
-              onClick={handleCanvasClick}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-            />
+            {layers.length > 0 && (
+              <canvas
+                ref={canvasRef}
+                style={{
+                  display: 'block',
+                  backgroundColor: '#e0e0e0ff',
+                  cursor: activeTool === 'move' 
+                    ? (draggedLayer ? 'grabbing' : 'grab') 
+                    : activeTool === 'eyedropper' ? 'crosshair' : 'default',
+                  transform: `translate(${imageOffset.x}px, ${imageOffset.y}px)`
+                }}
+                onClick={handleCanvasClick}
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
+              />
+            )}
             </Box>
             {activeTool === 'eyedropper' && (
             <Paper elevation={3} sx={{ 
               position: 'fixed', 
-              top: 100, 
-              right: 9, 
-              width: 330, 
+              bottom: 16, 
+              right: 16, 
+              width: 320, 
               p: 2,
               zIndex: 1000
             }}>
@@ -848,15 +1317,6 @@ const ImageProcessor = () => {
         </Box>
       </Box>
 
-      {/* <LayersPanel
-        layers={layers}
-        activeLayerId={activeLayerId}
-        setLayers={setLayers}
-        setActiveLayerId={setActiveLayerId}
-        handleAddLayer={handleAddLayer}
-        handleLayerFileUpload={handleLayerFileUpload}
-      /> */}
-
       {/* Статус бар */}
       <Paper 
         sx={{ 
@@ -869,36 +1329,20 @@ const ImageProcessor = () => {
         }}
         elevation={2}
       >
-        <Box sx={{ 
-          display: 'flex', 
-          gap: isMobile ? 0.5 : 2,
-          flexWrap: 'wrap',
-          alignItems: 'center'
-        }}>
-          {imageData ? (
-            <>
-              <Chip label={`${imageData.format.toUpperCase()}`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
-              <Chip label={`${imageData.width}×${imageData.height}px`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
-              <Chip label={`${imageData.colorDepth || 8}bpp`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
-              {imageData.format === 'gb7' && (
-                <>
-                  <Chip label={`v${imageData.version}`} size="small" sx={{ m: isMobile ? '2px' : 0 }} />
-                  <Chip 
-                    label={`Mask: ${imageData.hasMask ? 'Yes' : 'No'}`} 
-                    size="small" 
-                    color={imageData.hasMask ? 'primary' : 'default'}
-                    sx={{ m: isMobile ? '2px' : 0 }}
-                  />
-                </>
-              )}
-            </>
-          ) : (
-            <Typography variant="body2" sx={{ fontSize: isMobile ? '0.75rem' : '0.875rem' }}>
-              {status}
-            </Typography>
-          )}
-        </Box>
-        
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+        {layers[0] && (
+          <>
+            <Chip label={layers[0].name} size="small" />
+            <Chip 
+              label={`${layers[0].image.width}×${layers[0].image.height}px`} 
+              size="small" 
+            />
+          </>
+        )}
+        <Typography variant="body2" sx={{ fontSize: isMobile ? '0.75rem' : '0.875rem' }}>
+          {status}
+        </Typography>
+      </Box>
         <Box sx={{ 
           display: 'flex', 
           alignItems: 'center',
@@ -907,7 +1351,7 @@ const ImageProcessor = () => {
           mt: isMobile ? 1 : 0,
           width: isMobile ? '100%' : 'auto'
         }}>
-          {imageData && (
+          {layers.length > 0 && (
             <>
               <Tooltip title="Change image scale">
                 <IconButton size="small" onClick={openScaleDialog}>
@@ -934,6 +1378,22 @@ const ImageProcessor = () => {
         </Box>
       </Paper>
 
+      <Dialog open={exportDialogOpen} onClose={handleExportDialogClose}>
+      <DialogTitle>Экспорт изображения</DialogTitle>
+      <DialogContent dividers>
+        <Typography>Выберите формат:</Typography>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+          <Button variant="contained" onClick={handleExportPNG}>PNG</Button>
+          <Button variant="contained" onClick={handleExportJPG}>JPG</Button>
+          <Button variant="contained" onClick={handleExportGB7}>GB7</Button>
+        </Box>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={handleExportDialogClose}>Закрыть</Button>
+      </DialogActions>
+    </Dialog>
+
+
       {/* Модальное окно изменения размера */}
       <Dialog open={scaleDialogOpen} onClose={() => setScaleDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
@@ -952,120 +1412,124 @@ const ImageProcessor = () => {
           </IconButton>
         </DialogTitle>
         <DialogContent dividers>
-          {originalImageData && (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                <Typography>Original size: {originalImageData.width}×{originalImageData.height}px</Typography>
-                <Typography>Current size: {imageData?.width || 0}×{imageData?.height || 0}px</Typography>
-              </Box>
-              
-              {!validation.isValid && (
-              <Alert severity="error" sx={{ mb: 2 }}>
-                {validation.error}
-              </Alert>
-            )}
-              
-              <FormControl fullWidth>
-                <InputLabel>Resize Method</InputLabel>
-                <Select
-                  value={resizeMethod}
-                  label="Resize Method"
-                  onChange={handleResizeMethodChange}
-                >
-                  <MenuItem value="percent">Percentage</MenuItem>
-                  <MenuItem value="pixels">Pixels</MenuItem>
-                </Select>
-              </FormControl>
-              
-              {resizeMethod === 'percent' ? (
-                <Box>
-                  <Typography gutterBottom>Scale X: {scaleInput}%</Typography>
-                  <Slider
-                    value={scaleInput}
-                    onChange={handleScaleChange}
-                    min={12}
-                    max={300}
-                    step={1}
-                  />
-                  
-                  {!keepAspectRatio && (
-                    <>
-                      <Typography gutterBottom sx={{ mt: 2 }}>Scale Y: {scalePercentY}%</Typography>
-                      <Slider
-                        value={scalePercentY}
-                        onChange={handleScaleChangeY}
-                        min={12}
-                        max={300}
-                        step={1}
-                        disabled={keepAspectRatio}
-                      />
-                    </>
-                )}
-              </Box>
-              ) : (
-                <Box sx={{ display: 'flex', gap: 2 }}>
-                  <TextField
-                    label="Width"
-                    type="number"
-                    value={targetWidth}
-                    onChange={handleWidthChange}
-                    fullWidth
-                    inputProps={{ min: 1, max: 10000 }}
-                    error={!!validationError}
-                  />
-                  <TextField
-                    label="Height"
-                    type="number"
-                    value={targetHeight}
-                    onChange={handleHeightChange}
-                    fullWidth
-                    inputProps={{ min: 1, max: 10000 }}
-                    disabled={keepAspectRatio}
-                    error={!!validationError}
-                  />
-                </Box>
-              )}
-              
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={keepAspectRatio}
-                    onChange={(e) => {
-                      setKeepAspectRatio(e.target.checked);
-                      if (e.target.checked) {
-                        setScalePercentY(scalePercent);
-                      }
-                    }}
-                  />
-                }
-                label="Maintain aspect ratio"
-              />
-              
-              <FormControl fullWidth>
-                <InputLabel>Interpolation Method</InputLabel>
-                <Select
-                  value={interpolationMethod}
-                  label="Interpolation Method"
-                  onChange={(e) => setInterpolationMethod(e.target.value)}
-                >
-                  {interpolationMethods.map((method) => (
-                    <MenuItem key={method.value} value={method.value}>
-                      <Tooltip title={method.description} placement="right" arrow>
-                        <Box sx={{ width: '100%' }}>{method.label}</Box>
-                      </Tooltip>
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Box>
-          )}
+          {(() => {
+              const activeLayer = layers.find(l => l.id === activeLayerId);
+              const currentImage = activeLayer?.image || originalImageData?.imageElement;
+              return currentImage ? (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Typography>Original size: {currentImage.width}×{currentImage.height}px</Typography>
+                    <Typography>Current size: {currentImage.width * (scalePercent/100)}×{currentImage.height * (scalePercent/100)}px</Typography>
+                  </Box>
+                        
+                        {!validation.isValid && (
+                        <Alert severity="error" sx={{ mb: 2 }}>
+                          {validation.error}
+                        </Alert>
+                      )}
+                        
+                        <FormControl fullWidth>
+                          <InputLabel>Resize Method</InputLabel>
+                          <Select
+                            value={resizeMethod}
+                            label="Resize Method"
+                            onChange={handleResizeMethodChange}
+                          >
+                            <MenuItem value="percent">Percentage</MenuItem>
+                            <MenuItem value="pixels">Pixels</MenuItem>
+                          </Select>
+                        </FormControl>
+                        
+                        {resizeMethod === 'percent' ? (
+                          <Box>
+                            <Typography gutterBottom>Scale X: {scaleInput}%</Typography>
+                            <Slider
+                              value={scaleInput}
+                              onChange={handleScaleChange}
+                              min={12}
+                              max={300}
+                              step={1}
+                            />
+                            
+                            {!keepAspectRatio && (
+                              <>
+                                <Typography gutterBottom sx={{ mt: 2 }}>Scale Y: {scalePercentY}%</Typography>
+                                <Slider
+                                  value={scalePercentY}
+                                  onChange={handleScaleChangeY}
+                                  min={12}
+                                  max={300}
+                                  step={1}
+                                  disabled={keepAspectRatio}
+                                />
+                              </>
+                          )}
+                        </Box>
+                        ) : (
+                          <Box sx={{ display: 'flex', gap: 2 }}>
+                            <TextField
+                              label="Width"
+                              type="number"
+                              value={targetWidth}
+                              onChange={handleWidthChange}
+                              fullWidth
+                              inputProps={{ min: 1, max: 10000 }}
+                              error={!!validationError}
+                            />
+                            <TextField
+                              label="Height"
+                              type="number"
+                              value={targetHeight}
+                              onChange={handleHeightChange}
+                              fullWidth
+                              inputProps={{ min: 1, max: 10000 }}
+                              disabled={keepAspectRatio}
+                              error={!!validationError}
+                            />
+                          </Box>
+                        )}
+                        
+                        <FormControlLabel
+                          control={
+                            <Checkbox
+                              checked={keepAspectRatio}
+                              onChange={(e) => {
+                                setKeepAspectRatio(e.target.checked);
+                                if (e.target.checked) {
+                                  setScalePercentY(scalePercent);
+                                }
+                              }}
+                            />
+                          }
+                          label="Maintain aspect ratio"
+                        />
+                        
+                        <FormControl fullWidth>
+                          <InputLabel>Interpolation Method</InputLabel>
+                          <Select
+                            value={interpolationMethod}
+                            label="Interpolation Method"
+                            onChange={(e) => setInterpolationMethod(e.target.value)}
+                          >
+                            {interpolationMethods.map((method) => (
+                              <MenuItem key={method.value} value={method.value}>
+                                <Tooltip title={method.description} placement="right" arrow>
+                                  <Box sx={{ width: '100%' }}>{method.label}</Box>
+                                </Tooltip>
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Box>
+                    ) : null;
+            })()}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setScaleDialogOpen(false)}>Cancel</Button>
           <Button 
             onClick={resizeImage}
             variant="contained"
-            disabled={!validation.isValid || !originalImageData}
+            disabled={!validation.isValid}
             startIcon={<CheckIcon />}
           >
             Apply
@@ -1073,8 +1537,14 @@ const ImageProcessor = () => {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={newLayerDialogOpen} onClose={() => setNewLayerDialogOpen(false)}>
-        <DialogTitle>Создать новый слой</DialogTitle>
+      <CustomDialog 
+        open={newLayerDialogOpen} 
+        onClose={() => setNewLayerDialogOpen(false)}
+        role="dialog"
+        aria-labelledby="layer-dialog-title"
+        aria-modal="true"
+      >
+        <DialogTitle id="layer-dialog-title">Создать новый слой</DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <Button
             variant="contained"
@@ -1084,8 +1554,9 @@ const ImageProcessor = () => {
             Загрузить изображение
             <input
               type="file"
-              hidden
-              accept="image/*"
+              id="layer-upload-input"
+              style={{ display: 'none' }}
+              accept="image/*, .gb7"
               onChange={handleLayerFileUpload}
             />
           </Button>
@@ -1108,7 +1579,7 @@ const ImageProcessor = () => {
         <DialogActions>
           <Button onClick={() => setNewLayerDialogOpen(false)}>Отмена</Button>
         </DialogActions>
-      </Dialog>
+      </CustomDialog>
     </Box>
   );
 };
